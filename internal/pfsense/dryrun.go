@@ -4,6 +4,7 @@ package pfsense
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/go-logr/logr"
 )
@@ -21,6 +22,13 @@ func (d *DryRun) ListHostOverrides(ctx context.Context) ([]HostOverride, error) 
 		return nil, nil
 	}
 	return d.Inner.ListHostOverrides(ctx)
+}
+
+func (d *DryRun) GetHostOverride(ctx context.Context, id int) (HostOverride, error) {
+	if d.Inner == nil {
+		return HostOverride{}, fmt.Errorf("dry-run without pfSense: no override %d", id)
+	}
+	return d.Inner.GetHostOverride(ctx, id)
 }
 
 func (d *DryRun) CreateHostOverride(_ context.Context, h HostOverride) error {

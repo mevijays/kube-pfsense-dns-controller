@@ -52,11 +52,10 @@ spec:
           env:
             - name: PFSENSE_URL
               value: {{ $url | quote }}
-            - name: PFSENSE_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "kpdc.secretName" . }}
-                  key: {{ include "kpdc.secretKey" . }}
+            # The key is mounted as a file and re-read on every request, so rotating
+            # the Secret takes effect without restarting the pod.
+            - name: PFSENSE_API_KEY_FILE
+              value: /etc/pfsense-api/api-key
             - name: PFSENSE_INSECURE_SKIP_VERIFY
               value: {{ .Values.pfsense.insecureSkipVerify | quote }}
             {{- if .Values.pfsense.caSecret }}
@@ -83,6 +82,8 @@ spec:
               value: {{ .Values.config.resyncPeriod | quote }}
             - name: LEADER_ELECT
               value: {{ .Values.leaderElection.enabled | quote }}
+            - name: LEADER_ELECTION_ID
+              value: {{ include "kpdc.fullname" . | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -103,18 +104,27 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
-          {{- if .Values.pfsense.caSecret }}
           volumeMounts:
+            - name: pfsense-api
+              mountPath: /etc/pfsense-api
+              readOnly: true
+            {{- if .Values.pfsense.caSecret }}
             - name: pfsense-ca
               mountPath: /etc/pfsense-ca
               readOnly: true
-          {{- end }}
-      {{- if .Values.pfsense.caSecret }}
+            {{- end }}
       volumes:
+        - name: pfsense-api
+          secret:
+            secretName: {{ include "kpdc.secretName" . }}
+            items:
+              - key: {{ include "kpdc.secretKey" . }}
+                path: api-key
+        {{- if .Values.pfsense.caSecret }}
         - name: pfsense-ca
           secret:
             secretName: {{ .Values.pfsense.caSecret }}
-      {{- end }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

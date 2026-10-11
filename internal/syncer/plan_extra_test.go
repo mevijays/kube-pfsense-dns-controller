@@ -36,15 +36,15 @@ func TestAdoptTakesOverMatchingUnmanagedEntry(t *testing.T) {
 	if len(p.Update) != 1 || len(p.Create) != 0 || len(p.Delete) != 0 || len(p.Conflicts) != 0 {
 		t.Fatalf("plan = %+v", p)
 	}
-	u := p.Update[0]
-	if u.ID != 13 || !strings.HasPrefix(u.Descr, Marker(owner)) || !strings.HasSuffix(u.Descr, "| istioingress gatway") {
+	u := p.Update[0].New
+	if u.ID != 13 || p.Update[0].Old.Descr != "istioingress gatway" || !strings.HasPrefix(u.Descr, Marker(owner)) || !strings.HasSuffix(u.Descr, "| istioingress gatway") {
 		t.Fatalf("adopted entry = %+v (must be tagged and keep the original note)", u)
 	}
 
 	// After adoption the entry is managed: an IP change updates it and keeps the note.
 	adopted := u
 	p = BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.63"}), []pfsense.HostOverride{adopted}, Options{Owner: owner, Prune: true})
-	if len(p.Update) != 1 || !strings.HasSuffix(p.Update[0].Descr, "| istioingress gatway") {
+	if len(p.Update) != 1 || !strings.HasSuffix(p.Update[0].New.Descr, "| istioingress gatway") {
 		t.Fatalf("update of adopted entry lost its note: %+v", p)
 	}
 	// ...and when nothing changes there is nothing to do.
@@ -116,34 +116,38 @@ func (f *flaky) Apply(ctx context.Context) error {
 }
 
 func TestExecuteContinuesAfterFailures(t *testing.T) {
+	u := managed(1, "u", "1.1.1.1")
+	u2 := u
+	u2.IP = []string{"2.2.2.2"}
+	d := managed(2, "d", "1.1.1.1")
 	p := Plan{
 		Create: []pfsense.HostOverride{{Host: "a", Domain: "mylab.lan"}},
-		Update: []pfsense.HostOverride{{ID: 1, Host: "u", Domain: "mylab.lan"}},
-		Delete: []pfsense.HostOverride{{ID: 2}},
+		Update: []Update{{Old: u, New: u2}},
+		Delete: []pfsense.HostOverride{d},
 	}
-	f := &flaky{failCreate: true}
-	err := Execute(context.Background(), f, p, logr.Discard())
+	f := &flaky{fakeBackend: fakeBackend{byID: store(u, d)}, failCreate: true}
+	res, err := Execute(context.Background(), f, p, logr.Discard())
 	if err == nil || !strings.Contains(err.Error(), "boom create") {
 		t.Fatalf("err = %v", err)
 	}
 	if !reflect.DeepEqual(f.ops, []string{"update u.mylab.lan", "delete 2"}) {
 		t.Errorf("remaining operations did not run: %v", f.ops)
 	}
-	if f.applied != 1 {
+	if f.applied != 1 || !res.Applied {
 		t.Errorf("apply must still run for the changes that succeeded, got %d", f.applied)
 	}
 
 	// everything fails -> nothing changed -> no apply
-	f = &flaky{failCreate: true, failDelete: true}
-	_ = Execute(context.Background(), f, Plan{Create: p.Create, Delete: p.Delete}, logr.Discard())
-	if f.applied != 0 {
+	f = &flaky{fakeBackend: fakeBackend{byID: store(d)}, failCreate: true, failDelete: true}
+	if res, _ := Execute(context.Background(), f, Plan{Create: p.Create, Delete: p.Delete}, logr.Discard()); f.applied != 0 || res.Changed {
 		t.Errorf("apply called although nothing changed")
 	}
 
-	// apply failure is reported
-	f = &flaky{failApply: true}
-	if err := Execute(context.Background(), f, p, logr.Discard()); err == nil || !strings.Contains(err.Error(), "apply") {
-		t.Errorf("apply error not reported: %v", err)
+	// apply failure is reported, and the result says the writes are not applied
+	f = &flaky{fakeBackend: fakeBackend{byID: store(u, d)}, failApply: true}
+	res, err = Execute(context.Background(), f, p, logr.Discard())
+	if err == nil || !strings.Contains(err.Error(), "apply") || !res.Changed || res.Applied {
+		t.Errorf("apply error not reported: err=%v res=%+v", err, res)
 	}
 }
 
@@ -162,6 +166,14 @@ func (m *mem) List(context.Context) ([]pfsense.HostOverride, error) {
 }
 func (m *mem) ListHostOverrides(ctx context.Context) ([]pfsense.HostOverride, error) {
 	return m.List(ctx)
+}
+func (m *mem) GetHostOverride(_ context.Context, id int) (pfsense.HostOverride, error) {
+	if id < 0 || id >= len(m.items) {
+		return pfsense.HostOverride{}, fmt.Errorf("no override %d", id)
+	}
+	h := m.items[id]
+	h.ID = id
+	return h, nil
 }
 func (m *mem) CreateHostOverride(_ context.Context, h pfsense.HostOverride) error {
 	m.items = append(m.items, h)
@@ -220,7 +232,7 @@ func TestRandomizedSafetyAndConvergence(t *testing.T) {
 		before, _ := m.List(context.Background())
 		opt := Options{Owner: owner, Prune: prune, Adopt: adopt}
 		plan := BuildPlan(want, before, opt)
-		if err := Execute(context.Background(), m, plan, logr.Discard()); err != nil {
+		if _, err := Execute(context.Background(), m, plan, logr.Discard()); err != nil {
 			t.Fatalf("iter %d: %v", iter, err)
 		}
 		after, _ := m.List(context.Background())

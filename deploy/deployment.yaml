@@ -21,15 +21,15 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: controller
-          image: ghcr.io/mevijays/kube-pfsense-dns-controller:v0.1.0   # published by the release workflow on a v* tag
+          image: ghcr.io/mevijays/kube-pfsense-dns-controller:0.1.0   # tag v0.1.0 publishes image tag 0.1.0 (no "v")
           env:
             - { name: PFSENSE_URL, value: "https://pfsense.mylab.lan" }
             - { name: DNS_DOMAINS, value: "mylab.lan" }
             - { name: ISTIO_GATEWAY_NAMESPACES, value: "istio-system" }
             - { name: DRY_RUN, value: "true" }        # log only; set to "false" to write to pfSense
             - { name: PFSENSE_INSECURE_SKIP_VERIFY, value: "true" }   # self-signed pfSense cert; prefer PFSENSE_CA_FILE
-            - name: PFSENSE_API_KEY
-              valueFrom: { secretKeyRef: { name: pfsense-api, key: api-key } }
+            # mounted file, re-read on every request: rotating the Secret needs no restart
+            - { name: PFSENSE_API_KEY_FILE, value: /etc/pfsense-api/api-key }
           ports:
             - { name: metrics, containerPort: 8080 }
             - { name: probes, containerPort: 8081 }
@@ -42,3 +42,10 @@ spec:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: pfsense-api, mountPath: /etc/pfsense-api, readOnly: true }
+      volumes:
+        - name: pfsense-api
+          secret:
+            secretName: pfsense-api
+            items: [{ key: api-key, path: api-key }]

@@ -34,15 +34,23 @@ alternative for that case.
 | Source | Hostnames from | IP from |
 |---|---|---|
 | Gateway API `HTTPRoute` | `spec.hostnames` | `status.addresses` of every Gateway that has **accepted** the route |
-| Istio `VirtualService` | `spec.hosts` | external IP of the LoadBalancer Service in front of the ingress gateway pods selected by the referenced Istio `Gateway` (`spec.selector`) |
+| Istio `VirtualService` (whichever API version the cluster serves) | `spec.hosts` | external IP of the LoadBalancer Service in front of the ingress gateway pods selected by the referenced Istio `Gateway` (`spec.selector`) |
 
 - **Level-based.** Every change (plus a resync every 2 minutes) recomputes the whole desired state
   and diffs it with pfSense. No finalizers are added to your objects; deletes, IP changes and
   manual drift all heal the same way.
 - **Only touches its own records.** Each override it creates is tagged `managed-by=<owner-id>` in the
-  description. Entries without the tag (hand-made ones) are never updated or deleted; a name clash is logged and skipped.
-- **Prunes safely.** A managed record whose route is gone is deleted. If discovery had an error,
-  nothing is deleted that cycle.
+  description, and only an exact tag match counts (owner `dns` never claims `dns-b`'s records). Entries without the tag
+  (hand-made ones) are never updated or deleted; a name clash is logged once and skipped.
+- **Prunes safely.** A managed record is deleted only when no route or VirtualService declares its hostname any more.
+  While a hostname is still declared but its gateway address is temporarily unknown (gateway pods restarting, LB IP
+  being reassigned, route status being rewritten), its record is kept. If discovery had an error, nothing is deleted.
+- **Safe against concurrent edits.** pfSense identifies host overrides by list position, which shifts when an entry is
+  removed. Before every update or delete the controller re-reads the entry and only writes if it is still exactly the one
+  it planned against; otherwise it skips the remaining writes and re-plans on the next sync. So edits in the pfSense UI or
+  by another controller sharing the firewall can never make it change or delete the wrong record.
+- **Changes always get applied.** If the `apply` call fails, or the pod is stopped mid-sync, it is retried on the next
+  sync; once writes were made, `apply` is completed even during shutdown.
 - **Scoped by domain.** Only hostnames under `DNS_DOMAINS` are handled; others and wildcards
   (`*.mylab.lan`, which host overrides cannot express) are ignored.
 - **Multiple gateways.** A hostname served by two gateways gets both IPs on one override.
@@ -112,12 +120,14 @@ Sample resources are in [`examples/`](examples/).
 
 ## Configuration
 
-Flags, with environment variables as defaults.
+Flags, with environment variables as defaults. Boolean and duration variables are parsed strictly: a value such as
+`DRY_RUN=yes` stops the controller with a configuration error instead of being silently ignored (use `true`/`false`).
 
 | Env | Flag | Default | Description |
 |---|---|---|---|
 | `PFSENSE_URL` | `--pfsense-url` | | pfSense base URL, e.g. `https://pfsense.mylab.lan` |
-| `PFSENSE_API_KEY` | | | API key (environment only, never a flag) |
+| `PFSENSE_API_KEY_FILE` | `--pfsense-api-key-file` | | File holding the API key, re-read on every request (the chart mounts the Secret here, so rotating it needs no restart) |
+| `PFSENSE_API_KEY` | | | API key as an environment variable (used when no key file is set; never a flag) |
 | `PFSENSE_CA_FILE` | `--pfsense-ca-file` | | CA bundle to trust for pfSense's certificate |
 | `PFSENSE_INSECURE_SKIP_VERIFY` | `--pfsense-insecure-skip-verify` | `false` | Skip TLS verification (lab use) |
 | `DNS_DOMAINS` | `--domains` | **required** | Comma-separated domains to manage, e.g. `mylab.lan` |
@@ -130,6 +140,7 @@ Flags, with environment variables as defaults.
 | `ENABLE_GATEWAY_API` | `--enable-gateway-api` | `true` | Watch HTTPRoutes (disable if the Gateway API CRDs are absent) |
 | `RESYNC_PERIOD` | `--resync-period` | `2m` | Full resync interval |
 | `LEADER_ELECT` | `--leader-elect` | `true` | Leader election (needed when running more than one replica) |
+| `LEADER_ELECTION_ID` | `--leader-election-id` | derived from `OWNER_ID` | Lease name; separate instances in one namespace get separate leases |
 | `METRICS_ADDR` / `PROBE_ADDR` | `--metrics-bind-address` / `--health-probe-bind-address` | `:8080` / `:8081` | Metrics and `/healthz`, `/readyz` |
 
 pfSense endpoints used: `GET /api/v2/services/dns_resolver/host_overrides`,

@@ -6,6 +6,23 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed (in-depth review)
+- Updates and deletes re-read each entry by ID and only write if it is unchanged, so a concurrent edit in the pfSense UI
+  or by another controller can no longer make the controller modify or delete the wrong (possibly hand-made) record.
+- Ownership tags are matched exactly: owner `k8s-dns-sync` no longer claims (and prunes) records of `k8s-dns-sync-b`.
+- A hostname that is still declared but whose gateway address is temporarily unknown keeps its record instead of being deleted.
+- A failed or interrupted `apply` is retried on the next sync, and `apply` completes even if the pod is shutting down.
+- A 2xx response that is not the pfSense REST API envelope (HTML page, proxy, wrong URL) is an error, not an empty list.
+- Invalid boolean/duration environment values (e.g. `DRY_RUN=yes`) now stop the controller instead of being ignored.
+- `deploy/deployment.yaml` referenced image tag `v0.1.0`; release images are tagged without the `v`.
+- The leader election Lease is named per owner (or per Helm release), so separate instances no longer block each other.
+- The Istio API version is taken from the cluster, so Istio releases that serve only `v1beta1` work.
+- IP addresses are compared in canonical form, avoiding endless update/apply cycles for equivalent IPv6 spellings.
+- The API key is read from a mounted file and re-read on every request, so rotating the Secret needs no restart.
+- The HTTP client keeps the default transport (proxy from environment, dial and TLS handshake timeouts).
+- Conflicts are logged once when they appear or change, not on every sync.
+- Descriptions are truncated on a character boundary (no broken UTF-8).
+
 ### Added
 - Helm chart (`charts/kube-pfsense-dns-controller`), published to ghcr.io as an OCI artifact and attached to GitHub Releases.
 - Release workflow: multi-arch image (amd64/arm64) with SBOM and provenance, chart, GitHub Release.

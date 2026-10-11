@@ -77,8 +77,12 @@ func TestHTTPRouteEdgeCases(t *testing.T) {
 	want := map[string][]string{
 		"v6.mylab.lan":   {"2001:db8::1"}, // IPv6 passes through
 		"good.mylab.lan": {"10.1.1.1"},    // hostname is lower-cased
-		// pending (no address), missing gateway, no hostnames, hostname-type address,
-		// non-Gateway parent and deleting routes must all produce nothing
+		// Still declared but no usable address right now: kept with no IP, so an
+		// existing DNS entry is not pruned while the gateway is not ready.
+		"pending.mylab.lan":  nil, // gateway has no address yet
+		"missing.mylab.lan":  nil, // gateway not found
+		"hostaddr.mylab.lan": nil, // gateway only has a hostname-type address
+		// no hostnames, non-Gateway parent and deleting routes produce nothing
 	}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("got %v, want %v", names, want)
@@ -128,6 +132,12 @@ func TestVirtualServiceEdgeCases(t *testing.T) {
 	want := map[string][]string{
 		"ok.mylab.lan":   {"172.16.1.61"},
 		"fqdn.mylab.lan": {"172.16.1.61"},
+		// exposed through a gateway whose address is unknown: declared, no IP
+		"pending.mylab.lan": nil, // LB Service has no IP yet
+		"nosel.mylab.lan":   nil, // gateway has no selector
+		"nopods.mylab.lan":  nil, // no gateway pods right now (e.g. restarting)
+		"missing.mylab.lan": nil, // gateway not found
+		// mesh-only, no gateways and wildcards produce nothing
 	}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("got %v, want %v", names, want)

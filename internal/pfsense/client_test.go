@@ -17,7 +17,7 @@ func newTestClient(t *testing.T, h http.HandlerFunc) *Client {
 	t.Helper()
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
-	c, err := New(srv.URL, "secret-key", Options{})
+	c, err := New(srv.URL, StaticKey("secret-key"), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,10 +93,10 @@ func TestErrorIsReported(t *testing.T) {
 }
 
 func TestNewValidates(t *testing.T) {
-	if _, err := New("", "k", Options{}); err == nil {
+	if _, err := New("", StaticKey("k"), Options{}); err == nil {
 		t.Error("empty url accepted")
 	}
-	if _, err := New("https://x", "", Options{}); err == nil {
+	if _, err := New("https://x", StaticKey(""), Options{}); err == nil {
 		t.Error("empty key accepted")
 	}
 }

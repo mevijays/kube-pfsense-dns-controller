@@ -20,6 +20,10 @@ helm install kube-pfsense-dns-controller \
 
 Start with `config.dryRun=true`, read the logs, then set it to `false`.
 
+The API key Secret is mounted as a file and re-read on every request, so rotating the key
+(`kubectl create secret ... --dry-run=client -o yaml | kubectl apply -f -`) takes effect within about a minute,
+without restarting the pod.
+
 ## Required values
 
 | Value | Description |

@@ -33,10 +33,16 @@ expect_contains "image tag override"       'controller:9.9.9"'                  
 expect_contains "log level"                '--zap-log-level=debug'                    -- "${BASE[@]}" --set config.logLevel=debug
 
 echo "secrets"
-expect_contains "existing secret is referenced" 'name: pfsense-api'                   -- "${BASE[@]}"
+expect_contains "existing secret is mounted" 'secretName: pfsense-api'                -- "${BASE[@]}"
+expect_contains "key is read from the mounted file" 'name: PFSENSE_API_KEY_FILE value: /etc/pfsense-api/api-key' -- "${BASE[@]}"
+expect_absent   "key is not injected as an env var" 'name: PFSENSE_API_KEY value' -- "${BASE[@]}"
+expect_absent   "key is not read via secretKeyRef" 'secretKeyRef'                       -- "${BASE[@]}"
+expect_contains "inline key Secret is mounted" 'secretName: rel-kube-pfsense-dns-controller' -- --set pfsense.url=https://x --set pfsense.apiKey=abc --set 'config.domains={a.lan}'
+expect_contains "lease name is per release" 'name: LEADER_ELECTION_ID value: "rel-kube-pfsense-dns-controller"' -- "${BASE[@]}"
+expect_contains "lease name follows fullnameOverride" 'name: LEADER_ELECTION_ID value: "dns-a"' -- "${BASE[@]}" --set fullnameOverride=dns-a
 expect_absent   "no Secret object when using an existing one" 'kind: Secret'          -- "${BASE[@]}"
 expect_contains "inline key creates a Secret" 'kind: Secret'                          -- --set pfsense.url=https://x --set pfsense.apiKey=abc --set 'config.domains={a.lan}'
-expect_contains "custom secret key"        'key: token'                               -- "${BASE[@]}" --set pfsense.existingSecretKey=token
+expect_contains "custom secret key"        'key: token path: api-key'                 -- "${BASE[@]}" --set pfsense.existingSecretKey=token
 expect_contains "CA secret is mounted"     'PFSENSE_CA_FILE'                          -- "${BASE[@]}" --set pfsense.caSecret=pf-ca
 expect_absent   "no CA mount by default"   'pfsense-ca'                               -- "${BASE[@]}"
 
@@ -72,6 +78,11 @@ expect_absent   "service monitor needs the service" 'kind: ServiceMonitor'      
 echo "naming"
 expect_contains "release name is used"     'name: rel-kube-pfsense-dns-controller'    -- "${BASE[@]}"
 expect_contains "fullnameOverride"         'name: dns-sync( |$)'                          -- "${BASE[@]}" --set fullnameOverride=dns-sync
+
+echo "plain manifests (deploy/)"
+DEPLOY="$(dirname "$0")/../deploy/deployment.yaml"
+grep -Eq 'image: [^ ]+:v[0-9]' "$DEPLOY" && bad "deploy image tag must not start with v (release tags v1.2.3 publish image tag 1.2.3)" || ok "deploy image tag has no v prefix"
+grep -q 'PFSENSE_API_KEY_FILE' "$DEPLOY" && ok "deploy reads the key from a mounted file" || bad "deploy does not use PFSENSE_API_KEY_FILE"
 
 echo "kubectl client-side validation of the default render"
 if command -v kubectl >/dev/null && kubectl version --request-timeout=3s >/dev/null 2>&1; then

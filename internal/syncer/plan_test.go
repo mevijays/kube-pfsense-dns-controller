@@ -4,6 +4,7 @@ package syncer
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -46,7 +47,7 @@ func TestNoChangeWhenInSync(t *testing.T) {
 
 func TestUpdateWhenIPChanges(t *testing.T) {
 	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.63"}), []pfsense.HostOverride{managed(4, "jenkins", "172.16.1.61")}, Options{Owner: owner, Prune: true})
-	if len(p.Update) != 1 || p.Update[0].ID != 4 || !reflect.DeepEqual(p.Update[0].IP, []string{"172.16.1.63"}) {
+	if len(p.Update) != 1 || p.Update[0].New.ID != 4 || !reflect.DeepEqual(p.Update[0].New.IP, []string{"172.16.1.63"}) {
 		t.Fatalf("plan = %+v", p)
 	}
 }
@@ -78,23 +79,43 @@ func TestPrune(t *testing.T) {
 	}
 }
 
-func TestSkipsRecordsWithoutIP(t *testing.T) {
+func TestDeclaredRecordWithoutIPKeepsItsEntry(t *testing.T) {
 	s := records.Set{}
-	s.Add("pending", "mylab.lan", "", "HTTPRoute/default/x") // gateway has no address yet
-	p := BuildPlan(s, nil, Options{Owner: owner, Prune: true})
-	if !p.Empty() {
-		t.Fatalf("plan = %+v", p)
+	s.Declare("pending", "mylab.lan", "HTTPRoute/default/x") // gateway has no address right now
+	if p := BuildPlan(s, nil, Options{Owner: owner, Prune: true}); !p.Empty() {
+		t.Fatalf("nothing to create without an address: %+v", p)
 	}
-	// ...and an existing managed entry for it is pruned, not kept.
-	p = BuildPlan(s, []pfsense.HostOverride{managed(0, "pending", "1.1.1.1")}, Options{Owner: owner, Prune: true})
-	if len(p.Delete) != 1 {
-		t.Fatalf("plan = %+v", p)
+	// An existing managed entry must be kept (not pruned) while the address is unknown.
+	if p := BuildPlan(s, []pfsense.HostOverride{managed(0, "pending", "1.1.1.1")}, Options{Owner: owner, Prune: true}); !p.Empty() {
+		t.Fatalf("declared hostname was pruned: %+v", p)
+	}
+	// Once the hostname is no longer declared at all, it is pruned.
+	if p := BuildPlan(records.Set{}, []pfsense.HostOverride{managed(0, "pending", "1.1.1.1")}, Options{Owner: owner, Prune: true}); len(p.Delete) != 1 {
+		t.Fatalf("undeclared hostname not pruned: %+v", p)
 	}
 }
 
 type fakeBackend struct {
 	ops     []string
 	applied int
+	byID    map[int]pfsense.HostOverride // what GetHostOverride returns
+}
+
+func (f *fakeBackend) GetHostOverride(_ context.Context, id int) (pfsense.HostOverride, error) {
+	h, ok := f.byID[id]
+	if !ok {
+		return pfsense.HostOverride{}, fmt.Errorf("no override %d", id)
+	}
+	return h, nil
+}
+
+// store returns a map of the given entries by ID, for fakeBackend.byID.
+func store(hs ...pfsense.HostOverride) map[int]pfsense.HostOverride {
+	m := map[int]pfsense.HostOverride{}
+	for _, h := range hs {
+		m[h.ID] = h
+	}
+	return m
 }
 
 func (f *fakeBackend) ListHostOverrides(context.Context) ([]pfsense.HostOverride, error) {
@@ -115,26 +136,30 @@ func (f *fakeBackend) DeleteHostOverride(_ context.Context, id int) error {
 func (f *fakeBackend) Apply(context.Context) error { f.applied++; return nil }
 
 func TestExecuteOrderAndSingleApply(t *testing.T) {
+	upd := pfsense.HostOverride{ID: 1, Host: "upd", Domain: "mylab.lan", IP: []string{"1.1.1.1"}, Descr: Marker(owner)}
+	newUpd := upd
+	newUpd.IP = []string{"2.2.2.2"}
+	d2, d3, d5 := managed(2, "d2", "1.1.1.1"), managed(3, "d3", "1.1.1.1"), managed(5, "d5", "1.1.1.1")
 	p := Plan{
 		Create: []pfsense.HostOverride{{Host: "new", Domain: "mylab.lan"}},
-		Update: []pfsense.HostOverride{{ID: 1, Host: "upd", Domain: "mylab.lan"}},
-		Delete: []pfsense.HostOverride{{ID: 2}, {ID: 5}, {ID: 3}},
+		Update: []Update{{Old: upd, New: newUpd}},
+		Delete: []pfsense.HostOverride{d2, d5, d3},
 	}
-	f := &fakeBackend{}
-	if err := Execute(context.Background(), f, p, logr.Discard()); err != nil {
+	f := &fakeBackend{byID: store(upd, d2, d3, d5)}
+	res, err := Execute(context.Background(), f, p, logr.Discard())
+	if err != nil {
 		t.Fatal(err)
 	}
 	want := []string{"update upd.mylab.lan", "create new.mylab.lan", "delete 5", "delete 3", "delete 2"}
 	if !reflect.DeepEqual(f.ops, want) {
 		t.Errorf("ops = %v, want %v (deletes must run highest ID first)", f.ops, want)
 	}
-	if f.applied != 1 {
-		t.Errorf("apply called %d times", f.applied)
+	if f.applied != 1 || !res.Changed || !res.Applied {
+		t.Errorf("apply called %d times, result %+v", f.applied, res)
 	}
 
 	f = &fakeBackend{}
-	_ = Execute(context.Background(), f, Plan{}, logr.Discard())
-	if f.applied != 0 {
+	if res, _ := Execute(context.Background(), f, Plan{}, logr.Discard()); f.applied != 0 || res.Changed {
 		t.Error("apply called with nothing to do")
 	}
 }

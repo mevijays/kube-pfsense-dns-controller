@@ -42,6 +42,10 @@ func (h HostOverride) FQDN() string {
 // loop can be tested and run in dry-run mode without a firewall.
 type Backend interface {
 	ListHostOverrides(ctx context.Context) ([]HostOverride, error)
+	// GetHostOverride returns the override currently stored at id. IDs are list
+	// positions, so callers use it to check an entry is still the one they planned
+	// against before changing or deleting it.
+	GetHostOverride(ctx context.Context, id int) (HostOverride, error)
 	CreateHostOverride(ctx context.Context, h HostOverride) error
 	UpdateHostOverride(ctx context.Context, h HostOverride) error
 	DeleteHostOverride(ctx context.Context, id int) error
@@ -52,8 +56,29 @@ type Backend interface {
 // Client talks to the pfSense REST API.
 type Client struct {
 	baseURL string
-	apiKey  string
+	key     KeySource
 	hc      *http.Client
+}
+
+// KeySource returns the API key to send with a request.
+type KeySource func() (string, error)
+
+// StaticKey always returns key.
+func StaticKey(key string) KeySource {
+	key = strings.TrimSpace(key) // a trailing newline is a common mistake
+	return func() (string, error) { return key, nil }
+}
+
+// FileKey reads the key from path on every request, so a rotated Kubernetes
+// Secret mounted as a volume is picked up without restarting the pod.
+func FileKey(path string) KeySource {
+	return func() (string, error) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read API key file: %w", err)
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
 }
 
 // Options configure the HTTP transport.
@@ -64,12 +89,16 @@ type Options struct {
 }
 
 // New builds a Client. baseURL is e.g. https://pfsense.mylab.lan.
-func New(baseURL, apiKey string, opts Options) (*Client, error) {
-	apiKey = strings.TrimSpace(apiKey) // a trailing newline from a secret file is a common mistake
+func New(baseURL string, key KeySource, opts Options) (*Client, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("pfsense url is empty")
 	}
-	if apiKey == "" {
+	if key == nil {
+		return nil, fmt.Errorf("pfsense api key source is nil")
+	}
+	if k, err := key(); err != nil {
+		return nil, err
+	} else if k == "" {
 		return nil, fmt.Errorf("pfsense api key is empty")
 	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: opts.InsecureSkipVerify} //nolint:gosec // opt-in for lab firewalls with self-signed certs
@@ -88,10 +117,14 @@ func New(baseURL, apiKey string, opts Options) (*Client, error) {
 	if timeout == 0 {
 		timeout = 30 * time.Second
 	}
+	// Start from the default transport to keep proxy-from-environment, dial and
+	// TLS handshake timeouts and HTTP/2; only the TLS settings differ.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = tlsCfg
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		hc:      &http.Client{Timeout: timeout, Transport: &http.Transport{TLSClientConfig: tlsCfg}},
+		key:     key,
+		hc:      &http.Client{Timeout: timeout, Transport: tr},
 	}, nil
 }
 
@@ -136,7 +169,14 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("x-api-key", c.apiKey)
+	key, err := c.key()
+	if err != nil {
+		return err
+	}
+	if key == "" {
+		return fmt.Errorf("pfsense api key is empty")
+	}
+	req.Header.Set("x-api-key", key)
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -151,7 +191,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		return err
 	}
 	var env envelope
-	_ = json.Unmarshal(raw, &env) // best effort: error bodies are enveloped too
+	envErr := json.Unmarshal(raw, &env) // error bodies are enveloped too
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		msg := env.Message
 		if msg == "" {
@@ -162,7 +202,20 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 		return &Error{Method: method, Path: path, HTTPStatus: resp.StatusCode, Message: msg, ResponseID: env.ResponseID}
 	}
-	if out != nil && len(env.Data) > 0 {
+	// A 2xx answer that is not the REST API envelope (an HTML login page, a proxy,
+	// a wrong base URL) must not be mistaken for success or for an empty list.
+	if envErr != nil || env.Code == 0 {
+		snippet := strings.TrimSpace(string(raw))
+		if len(snippet) > 80 {
+			snippet = snippet[:80]
+		}
+		return fmt.Errorf("pfsense %s %s: HTTP %d but the body is not a pfSense REST API response (check PFSENSE_URL): %q",
+			method, path, resp.StatusCode, snippet)
+	}
+	if out != nil {
+		if len(env.Data) == 0 {
+			return fmt.Errorf("pfsense %s %s: response has no data", method, path)
+		}
 		if err := json.Unmarshal(env.Data, out); err != nil {
 			return fmt.Errorf("pfsense %s %s: decode data: %w", method, path, err)
 		}
@@ -176,6 +229,16 @@ func (c *Client) ListHostOverrides(ctx context.Context) ([]HostOverride, error) 
 	q := url.Values{"limit": {"0"}}
 	if err := c.do(ctx, http.MethodGet, basePath+"/host_overrides", q, nil, &out); err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// GetHostOverride returns the override currently stored at id.
+func (c *Client) GetHostOverride(ctx context.Context, id int) (HostOverride, error) {
+	var out HostOverride
+	q := url.Values{"id": {fmt.Sprint(id)}}
+	if err := c.do(ctx, http.MethodGet, basePath+"/host_override", q, nil, &out); err != nil {
+		return HostOverride{}, err
 	}
 	return out, nil
 }

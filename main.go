@@ -7,13 +7,17 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +47,8 @@ func main() {
 		enableGWAPI = flag.Bool("enable-gateway-api", envBool("ENABLE_GATEWAY_API", true), "watch Gateway API HTTPRoutes")
 		resync      = flag.Duration("resync-period", envDuration("RESYNC_PERIOD", 2*time.Minute), "full resync interval")
 		leaderElect = flag.Bool("leader-elect", envBool("LEADER_ELECT", true), "enable leader election")
+		leaseName   = flag.String("leader-election-id", env("LEADER_ELECTION_ID", ""), "name of the leader election Lease; defaults to one derived from --owner-id so separate instances do not share it (env LEADER_ELECTION_ID)")
+		pfKeyFile   = flag.String("pfsense-api-key-file", env("PFSENSE_API_KEY_FILE", ""), "file holding the API key, re-read on every request so a rotated Secret is picked up (env PFSENSE_API_KEY_FILE); otherwise PFSENSE_API_KEY is used")
 		metricsAddr = flag.String("metrics-bind-address", env("METRICS_ADDR", ":8080"), "metrics endpoint")
 		probeAddr   = flag.String("health-probe-bind-address", env("PROBE_ADDR", ":8081"), "health probe endpoint")
 	)
@@ -60,7 +66,11 @@ func main() {
 	// pfSense backend
 	var backend pfsense.Backend
 	if *pfURL != "" {
-		c, err := pfsense.New(*pfURL, os.Getenv("PFSENSE_API_KEY"), pfsense.Options{
+		key := pfsense.StaticKey(os.Getenv("PFSENSE_API_KEY"))
+		if *pfKeyFile != "" {
+			key = pfsense.FileKey(*pfKeyFile)
+		}
+		c, err := pfsense.New(*pfURL, key, pfsense.Options{
 			InsecureSkipVerify: *pfInsecure, CAFile: *pfCA,
 		})
 		if err != nil {
@@ -84,7 +94,7 @@ func main() {
 		Metrics:                metricsserver.Options{BindAddress: *metricsAddr},
 		HealthProbeBindAddress: *probeAddr,
 		LeaderElection:         *leaderElect,
-		LeaderElectionID:       "kube-pfsense-dns-controller.mylab.lan",
+		LeaderElectionID:       leaseID(*leaseName, *owner),
 		// Serve Istio (unstructured) reads from the informer cache too.
 		Client: client.Options{Cache: &client.CacheOptions{Unstructured: true}},
 	})
@@ -94,6 +104,19 @@ func main() {
 	must(log, mgr.AddHealthzCheck("healthz", healthz.Ping))
 	must(log, mgr.AddReadyzCheck("readyz", healthz.Ping))
 
+	// Use the Istio API version the cluster actually serves.
+	vsGVK, igwGVK := discover.VirtualServiceGVK, discover.IstioGatewayGVK
+	if *enableIstio {
+		var err error
+		if vsGVK, err = servedGVK(mgr.GetRESTMapper(), vsGVK); err != nil {
+			fatal(log, "Istio VirtualService API not found ("+err.Error()+"); install Istio or set ENABLE_ISTIO=false")
+		}
+		if igwGVK, err = servedGVK(mgr.GetRESTMapper(), igwGVK); err != nil {
+			fatal(log, "Istio Gateway API not found ("+err.Error()+"); install Istio or set ENABLE_ISTIO=false")
+		}
+		log.Info("using Istio API", "virtualService", vsGVK.Version, "gateway", igwGVK.Version)
+	}
+
 	var nss []string
 	for _, ns := range strings.Split(*istioNS, ",") {
 		if ns = strings.TrimSpace(ns); ns != "" {
@@ -102,13 +125,15 @@ func main() {
 	}
 	r := &controller.Reconciler{
 		Discoverer: &discover.Discoverer{
-			Client:           mgr.GetClient(),
-			APIReader:        mgr.GetAPIReader(),
-			Domains:          doms,
-			IstioNamespaces:  nss,
-			EnableIstio:      *enableIstio,
-			EnableGatewayAPI: *enableGWAPI,
-			Log:              ctrl.Log.WithName("discover"),
+			Client:            mgr.GetClient(),
+			APIReader:         mgr.GetAPIReader(),
+			Domains:           doms,
+			IstioNamespaces:   nss,
+			EnableIstio:       *enableIstio,
+			EnableGatewayAPI:  *enableGWAPI,
+			VirtualServiceGVK: vsGVK,
+			IstioGatewayGVK:   igwGVK,
+			Log:               ctrl.Log.WithName("discover"),
 		},
 		Backend: backend,
 		Owner:   *owner,
@@ -131,22 +156,82 @@ func env(k, def string) string {
 	return def
 }
 
+// envBool reads a boolean environment variable. An unparseable value is a fatal
+// configuration error: silently falling back (e.g. DRY_RUN=yes -> false) could
+// turn a dry run into real writes.
 func envBool(k string, def bool) bool {
-	if v := os.Getenv(k); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
+	b, err := parseEnvBool(k, def)
+	if err != nil {
+		exitConfig(err)
 	}
-	return def
+	return b
 }
 
-func envDuration(k string, def time.Duration) time.Duration {
-	if v := os.Getenv(k); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+func parseEnvBool(k string, def bool) (bool, error) {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def, nil
 	}
-	return def
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s=%q: use true or false", k, v)
+	}
+	return b, nil
+}
+
+// envDuration reads a duration environment variable; unparseable values are fatal.
+func envDuration(k string, def time.Duration) time.Duration {
+	d, err := parseEnvDuration(k, def)
+	if err != nil {
+		exitConfig(err)
+	}
+	return d
+}
+
+func parseEnvDuration(k string, def time.Duration) (time.Duration, error) {
+	v := strings.TrimSpace(os.Getenv(k))
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("invalid %s=%q: use a positive duration such as 2m or 90s", k, v)
+	}
+	return d, nil
+}
+
+func exitConfig(err error) {
+	fmt.Fprintln(os.Stderr, "configuration error:", err)
+	os.Exit(2)
+}
+
+var nonDNS = regexp.MustCompile(`[^a-z0-9.-]+`)
+
+// leaseID returns the leader election Lease name: the explicit value, or one
+// derived from the owner ID so that separate instances (other pfSense targets or
+// owners) in one namespace do not compete for a single lease.
+func leaseID(explicit, owner string) string {
+	if explicit != "" {
+		return explicit
+	}
+	s := strings.Trim(nonDNS.ReplaceAllString(strings.ToLower(owner), "-"), "-.")
+	if s == "" {
+		s = "default"
+	}
+	id := "kube-pfsense-dns-controller-" + s
+	if len(id) > 63 {
+		id = strings.TrimRight(id[:63], "-.")
+	}
+	return id
+}
+
+// servedGVK returns gvk with the version the API server prefers for its kind.
+func servedGVK(mapper meta.RESTMapper, gvk schema.GroupVersionKind) (schema.GroupVersionKind, error) {
+	m, err := mapper.RESTMapping(gvk.GroupKind())
+	if err != nil {
+		return gvk, err
+	}
+	return m.GroupVersionKind, nil
 }
 
 func must(log logr.Logger, err error) {

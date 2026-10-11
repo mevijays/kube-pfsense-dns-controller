@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -26,8 +27,10 @@ import (
 )
 
 var (
-	// VirtualServiceGVK and IstioGatewayGVK are read as unstructured objects so
-	// the controller does not need to vendor the whole Istio API.
+	// VirtualServiceGVK and IstioGatewayGVK are the default versions of the Istio
+	// kinds, which are read as unstructured objects so the controller does not
+	// need to vendor the whole Istio API. main replaces the version with the one
+	// the cluster serves (older Istio releases only serve v1beta1/v1alpha3).
 	VirtualServiceGVK = schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1", Kind: "VirtualService"}
 	IstioGatewayGVK   = schema.GroupVersionKind{Group: "networking.istio.io", Version: "v1", Kind: "Gateway"}
 )
@@ -48,7 +51,28 @@ type Discoverer struct {
 	EnableIstio      bool
 	EnableGatewayAPI bool
 
+	// VirtualServiceGVK and IstioGatewayGVK override the package defaults with
+	// the versions served by the cluster. Zero values mean the defaults.
+	VirtualServiceGVK schema.GroupVersionKind
+	IstioGatewayGVK   schema.GroupVersionKind
+
 	Log logr.Logger
+}
+
+// VirtualServiceKind returns the VirtualService GVK in use.
+func (d *Discoverer) VirtualServiceKind() schema.GroupVersionKind {
+	if d.VirtualServiceGVK.Empty() {
+		return VirtualServiceGVK
+	}
+	return d.VirtualServiceGVK
+}
+
+// IstioGatewayKind returns the Istio Gateway GVK in use.
+func (d *Discoverer) IstioGatewayKind() schema.GroupVersionKind {
+	if d.IstioGatewayGVK.Empty() {
+		return IstioGatewayGVK
+	}
+	return d.IstioGatewayGVK
 }
 
 // Discover returns the desired records. A non-nil error means the result may
@@ -102,12 +126,20 @@ func (d *Discoverer) fromHTTPRoutes(ctx context.Context, set records.Set) error 
 		if len(hosts) == 0 {
 			continue
 		}
+		if !hasGatewayParent(r) {
+			continue
+		}
+		src := fmt.Sprintf("HTTPRoute/%s/%s", r.Namespace, r.Name)
+		// Declare the hostnames first: if the address is unknown right now the
+		// existing DNS entry is kept instead of being pruned.
+		for _, hd := range hosts {
+			set.Declare(hd[0], hd[1], src)
+		}
 		ips, err := d.httpRouteIPs(ctx, r)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("httproute %s/%s: %w", r.Namespace, r.Name, err))
 			continue
 		}
-		src := fmt.Sprintf("HTTPRoute/%s/%s", r.Namespace, r.Name)
 		for _, hd := range hosts {
 			for _, ip := range ips {
 				set.Add(hd[0], hd[1], ip, src)
@@ -117,14 +149,28 @@ func (d *Discoverer) fromHTTPRoutes(ctx context.Context, set records.Set) error 
 	return errors.Join(errs...)
 }
 
+// isGatewayRef reports whether a parentRef points at a Gateway API Gateway.
+func isGatewayRef(ref gatewayv1.ParentReference) bool {
+	if ref.Kind != nil && string(*ref.Kind) != "Gateway" {
+		return false
+	}
+	return ref.Group == nil || string(*ref.Group) == gatewayv1.GroupName
+}
+
+func hasGatewayParent(r *gatewayv1.HTTPRoute) bool {
+	for _, ref := range r.Spec.ParentRefs {
+		if isGatewayRef(ref) {
+			return true
+		}
+	}
+	return false
+}
+
 // httpRouteIPs returns the addresses of every Gateway the route is accepted by.
 func (d *Discoverer) httpRouteIPs(ctx context.Context, r *gatewayv1.HTTPRoute) ([]string, error) {
 	var ips []string
 	for _, ref := range r.Spec.ParentRefs {
-		if ref.Kind != nil && string(*ref.Kind) != "Gateway" {
-			continue
-		}
-		if ref.Group != nil && string(*ref.Group) != gatewayv1.GroupName {
+		if !isGatewayRef(ref) {
 			continue
 		}
 		ns := r.Namespace
@@ -178,7 +224,7 @@ func routeAccepted(r *gatewayv1.HTTPRoute, gwNS, gwName string) bool {
 
 func (d *Discoverer) fromVirtualServices(ctx context.Context, set records.Set) error {
 	list := &unstructured.UnstructuredList{}
-	gvk := VirtualServiceGVK
+	gvk := d.VirtualServiceKind()
 	gvk.Kind += "List"
 	list.SetGroupVersionKind(gvk)
 	if err := d.Client.List(ctx, list); err != nil {
@@ -198,11 +244,17 @@ func (d *Discoverer) fromVirtualServices(ctx context.Context, set records.Set) e
 			continue
 		}
 		gwRefs, _, _ := unstructured.NestedStringSlice(vs.Object, "spec", "gateways")
+		src := fmt.Sprintf("VirtualService/%s/%s", vs.GetNamespace(), vs.GetName())
 		var ips []string
 		for _, ref := range gwRefs {
 			ns, name, ok := parseGatewayRef(ref, vs.GetNamespace())
 			if !ok {
 				continue
+			}
+			// Exposed through an ingress gateway: declare the hostnames so their
+			// DNS entries are kept while the gateway's address is unknown.
+			for _, hd := range hosts {
+				set.Declare(hd[0], hd[1], src)
 			}
 			got, err := d.istioGatewayIPs(ctx, ns, name, lbCache)
 			if err != nil {
@@ -211,7 +263,6 @@ func (d *Discoverer) fromVirtualServices(ctx context.Context, set records.Set) e
 			}
 			ips = append(ips, got...)
 		}
-		src := fmt.Sprintf("VirtualService/%s/%s", vs.GetNamespace(), vs.GetName())
 		for _, hd := range hosts {
 			for _, ip := range records.SortedUnique(ips) {
 				set.Add(hd[0], hd[1], ip, src)
@@ -246,7 +297,7 @@ func parseGatewayRef(ref, defaultNS string) (ns, name string, ok bool) {
 // an Istio Gateway selects.
 func (d *Discoverer) istioGatewayIPs(ctx context.Context, ns, name string, cache map[string][]string) ([]string, error) {
 	gw := &unstructured.Unstructured{}
-	gw.SetGroupVersionKind(IstioGatewayGVK)
+	gw.SetGroupVersionKind(d.IstioGatewayKind())
 	if err := d.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, gw); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil, nil
@@ -299,7 +350,7 @@ func (d *Discoverer) workloadLBIPs(ctx context.Context, selector map[string]stri
 			if svc.Spec.Type != corev1.ServiceTypeLoadBalancer || len(svc.Spec.Selector) == 0 {
 				continue
 			}
-			if !selectsAny(svc.Spec.Selector, pods.Items) {
+			if !selectsAny(labels.SelectorFromSet(svc.Spec.Selector), pods.Items) {
 				continue
 			}
 			for _, in := range svc.Status.LoadBalancer.Ingress {
@@ -312,16 +363,9 @@ func (d *Discoverer) workloadLBIPs(ctx context.Context, selector map[string]stri
 	return records.SortedUnique(ips), nil
 }
 
-func selectsAny(selector map[string]string, pods []corev1.Pod) bool {
+func selectsAny(sel labels.Selector, pods []corev1.Pod) bool {
 	for i := range pods {
-		match := true
-		for k, v := range selector {
-			if pods[i].Labels[k] != v {
-				match = false
-				break
-			}
-		}
-		if match {
+		if sel.Matches(labels.Set(pods[i].Labels)) {
 			return true
 		}
 	}

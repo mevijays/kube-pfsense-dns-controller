@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -35,6 +36,14 @@ func (m *memPfSense) ListHostOverrides(context.Context) ([]pfsense.HostOverride,
 		out[i] = h
 	}
 	return out, nil
+}
+func (m *memPfSense) GetHostOverride(_ context.Context, id int) (pfsense.HostOverride, error) {
+	if id < 0 || id >= len(m.items) {
+		return pfsense.HostOverride{}, fmt.Errorf("no override %d", id)
+	}
+	h := m.items[id]
+	h.ID = id
+	return h, nil
 }
 func (m *memPfSense) CreateHostOverride(_ context.Context, h pfsense.HostOverride) error {
 	m.items = append(m.items, h)

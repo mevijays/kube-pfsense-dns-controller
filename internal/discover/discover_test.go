@@ -89,8 +89,9 @@ func TestHTTPRouteUsesGatewayAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("want only app2.mylab.lan, got %v", got)
+	// the rejected route's hostname is declared without an address (kept, never created)
+	if len(got) != 2 || len(got["nope.mylab.lan"].IPs) != 0 {
+		t.Fatalf("want app2.mylab.lan and an address-less nope.mylab.lan, got %v", got)
 	}
 	r := got["app2.mylab.lan"]
 	if r == nil || !reflect.DeepEqual(r.IPs, []string{"172.16.1.63"}) || r.Sources[0] != "HTTPRoute/default/ok" {

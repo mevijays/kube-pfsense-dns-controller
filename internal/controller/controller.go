@@ -7,6 +7,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -41,6 +42,12 @@ type Reconciler struct {
 	Log        logr.Logger
 
 	mu sync.Mutex // serialises the periodic loop and event-driven reconciles
+	// applyPending is set when writes reached pfSense but the apply that makes
+	// them live did not succeed; the next sync retries the apply.
+	applyPending bool
+	// lastConflicts holds the conflicts reported by the previous sync, so each is
+	// logged once when it appears or changes rather than on every sync.
+	lastConflicts map[string]string
 }
 
 // Reconcile implements reconcile.Reconciler.
@@ -72,21 +79,56 @@ func (r *Reconciler) Sync(ctx context.Context) (err error) {
 	}
 	plan := syncer.BuildPlan(desired, current, syncer.Options{Owner: r.Owner, Prune: r.Prune && derr == nil, Adopt: r.Adopt})
 	metrics.Conflicts.Set(float64(len(plan.Conflicts)))
-	for _, c := range plan.Conflicts {
-		if c.Same() {
-			r.Log.Info("unmanaged host override already resolves to the desired IP; leaving it alone (use --adopt-existing to manage it)",
-				"fqdn", c.Name, "ip", c.Desired)
-			continue
-		}
-		r.Log.Info("CONFLICT: an unmanaged host override has a different IP; skipping (use --adopt-existing to take it over)",
-			"fqdn", c.Name, "pfsenseIP", c.Existing, "clusterIP", c.Desired)
-	}
+	r.logConflicts(plan.Conflicts)
+
 	if plan.Empty() {
+		if r.applyPending {
+			// Earlier writes were not applied (apply failed or the process was
+			// interrupted): retry the apply even though nothing else changed.
+			r.Log.Info("retrying apply of earlier changes")
+			if err := syncer.Apply(ctx, r.Backend); err != nil {
+				return errors.Join(derr, err)
+			}
+			r.applyPending = false
+		}
 		r.Log.V(1).Info("in sync", "records", len(desired))
 		return derr
 	}
 	r.Log.Info("changes needed", "create", len(plan.Create), "update", len(plan.Update), "delete", len(plan.Delete))
-	return errors.Join(derr, syncer.Execute(ctx, r.Backend, plan, r.Log))
+	res, xerr := syncer.Execute(ctx, r.Backend, plan, r.Log)
+	switch {
+	case res.Applied:
+		r.applyPending = false
+	case res.Changed:
+		r.applyPending = true
+	}
+	return errors.Join(derr, xerr)
+}
+
+// logConflicts logs a conflict when it first appears or changes, and when it is
+// resolved, instead of repeating every one on every sync.
+func (r *Reconciler) logConflicts(conflicts []syncer.Conflict) {
+	now := make(map[string]string, len(conflicts))
+	for _, c := range conflicts {
+		key := fmt.Sprint(c.Existing, c.Desired)
+		now[c.Name] = key
+		if r.lastConflicts[c.Name] == key {
+			continue
+		}
+		if c.Same() {
+			r.Log.Info("unmanaged host override already resolves to the desired IP; leaving it alone (use --adopt-existing to manage it)",
+				"fqdn", c.Name, "ip", c.Desired)
+		} else {
+			r.Log.Info("CONFLICT: an unmanaged host override has a different IP; skipping (use --adopt-existing to take it over)",
+				"fqdn", c.Name, "pfsenseIP", c.Existing, "clusterIP", c.Desired)
+		}
+	}
+	for name := range r.lastConflicts {
+		if _, still := now[name]; !still {
+			r.Log.Info("conflict resolved", "fqdn", name)
+		}
+	}
+	r.lastConflicts = now
 }
 
 // Setup registers the controller and the periodic resync with the manager.
@@ -101,9 +143,9 @@ func (r *Reconciler) Setup(mgr ctrl.Manager, resync time.Duration) error {
 	}
 	if r.Discoverer.EnableIstio {
 		vs := &unstructured.Unstructured{}
-		vs.SetGroupVersionKind(discover.VirtualServiceGVK)
+		vs.SetGroupVersionKind(r.Discoverer.VirtualServiceKind())
 		gw := &unstructured.Unstructured{}
-		gw.SetGroupVersionKind(discover.IstioGatewayGVK)
+		gw.SetGroupVersionKind(r.Discoverer.IstioGatewayKind())
 		b = b.Watches(vs, toSync).Watches(gw, toSync)
 	}
 	if err := b.Complete(r); err != nil {
