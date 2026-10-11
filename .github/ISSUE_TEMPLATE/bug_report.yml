@@ -1,0 +1,28 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you see instead?
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The HTTPRoute / VirtualService / Gateway involved (redact secrets), and what you ran.
+    validations: { required: true }
+  - type: textarea
+    id: logs
+    attributes:
+      label: Controller logs
+      description: Run with `DRY_RUN=true` if you can. Remove API keys and internal hostnames you do not want to share.
+      render: shell
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Controller version, Kubernetes, Istio / Gateway API implementation and version, pfSense and REST API package version.
+    validations: { required: true }

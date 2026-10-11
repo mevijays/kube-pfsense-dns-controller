@@ -1,0 +1,44 @@
+# Create the API key secret first (it is not stored in git):
+#   kubectl -n dns-sync create secret generic pfsense-api \
+#     --from-literal=api-key='<pfSense REST API key>'
+# Set PFSENSE_URL / DNS_DOMAINS for your site. Use your own image if you build it yourself.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-pfsense-dns-controller
+  namespace: dns-sync
+spec:
+  replicas: 1                      # leader election makes 2 safe if you want failover
+  selector:
+    matchLabels: { app: kube-pfsense-dns-controller }
+  template:
+    metadata:
+      labels: { app: kube-pfsense-dns-controller }
+    spec:
+      serviceAccountName: kube-pfsense-dns-controller
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: controller
+          image: ghcr.io/mevijays/kube-pfsense-dns-controller:v0.1.0   # published by the release workflow on a v* tag
+          env:
+            - { name: PFSENSE_URL, value: "https://pfsense.mylab.lan" }
+            - { name: DNS_DOMAINS, value: "mylab.lan" }
+            - { name: ISTIO_GATEWAY_NAMESPACES, value: "istio-system" }
+            - { name: DRY_RUN, value: "true" }        # log only; set to "false" to write to pfSense
+            - { name: PFSENSE_INSECURE_SKIP_VERIFY, value: "true" }   # self-signed pfSense cert; prefer PFSENSE_CA_FILE
+            - name: PFSENSE_API_KEY
+              valueFrom: { secretKeyRef: { name: pfsense-api, key: api-key } }
+          ports:
+            - { name: metrics, containerPort: 8080 }
+            - { name: probes, containerPort: 8081 }
+          livenessProbe: { httpGet: { path: /healthz, port: probes } }
+          readinessProbe: { httpGet: { path: /readyz, port: probes } }
+          resources:
+            requests: { cpu: 25m, memory: 48Mi }
+            limits: { memory: 192Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }

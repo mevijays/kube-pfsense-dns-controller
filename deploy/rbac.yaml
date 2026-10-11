@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dns-sync
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-pfsense-dns-controller
+  namespace: dns-sync
+---
+# Read-only access to the objects that carry hostnames and gateway addresses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-pfsense-dns-controller
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "gateways"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.istio.io"]
+    resources: ["virtualservices", "gateways"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-pfsense-dns-controller
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kube-pfsense-dns-controller }
+subjects:
+  - { kind: ServiceAccount, name: kube-pfsense-dns-controller, namespace: dns-sync }
+---
+# Pods and Services are read only in the namespace of the Istio ingress gateway,
+# to find the LoadBalancer IP in front of it. Add a Role per extra namespace listed in
+# ISTIO_GATEWAY_NAMESPACES.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-pfsense-dns-controller
+  namespace: istio-system
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-pfsense-dns-controller
+  namespace: istio-system
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: kube-pfsense-dns-controller }
+subjects:
+  - { kind: ServiceAccount, name: kube-pfsense-dns-controller, namespace: dns-sync }
+---
+# Leader election.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kube-pfsense-dns-controller-leader-election
+  namespace: dns-sync
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kube-pfsense-dns-controller-leader-election
+  namespace: dns-sync
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: kube-pfsense-dns-controller-leader-election }
+subjects:
+  - { kind: ServiceAccount, name: kube-pfsense-dns-controller, namespace: dns-sync }

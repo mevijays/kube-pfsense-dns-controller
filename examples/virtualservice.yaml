@@ -1,0 +1,28 @@
+# Istio: the hostname comes from spec.hosts. The IP is the LoadBalancer Service in front
+# of the ingress gateway pods selected by the referenced Istio Gateway's spec.selector.
+# Result on pfSense:  app1.mylab.lan -> <external IP of istio-ingressgateway>
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: shared-istio-gw
+  namespace: istio-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port: { number: 80, name: http, protocol: HTTP }
+      hosts: ["*.mylab.lan"]
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: app1
+  namespace: default
+spec:
+  hosts: ["app1.mylab.lan"]
+  gateways: ["istio-system/shared-istio-gw"]
+  http:
+    - route:
+        - destination:
+            host: app1
+            port: { number: 80 }

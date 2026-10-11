@@ -1,0 +1,5 @@
+/kube-pfsense-dns-controller
+/bin/
+*.out
+coverage.*
+.DS_Store
