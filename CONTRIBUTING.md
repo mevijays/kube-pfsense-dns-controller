@@ -22,7 +22,9 @@ You need Go (the version in `go.mod`) and, to try it on a cluster, `kubectl` acc
 ```bash
 git clone https://github.com/mevijays/kube-pfsense-dns-controller
 cd kube-pfsense-dns-controller
-make check        # gofmt check, go vet, tests with -race (what CI runs)
+make check        # gofmt check, go vet, tests with -race
+make lint vuln    # staticcheck, govulncheck
+make chart-lint && ./hack/chart-test.sh   # Helm chart (needs helm and python3 with pyyaml)
 make build        # binary in ./bin
 make run-dry      # run against your current kubeconfig context, writes nothing to pfSense
 ```
@@ -40,7 +42,9 @@ lines, so you can see what would be published without a firewall.
 | `internal/pfsense` | pfSense REST API v2 client and the dry-run backend |
 | `internal/records` | domain matching and the desired-state types |
 | `internal/controller` | controller-runtime wiring and the periodic resync |
-| `deploy/` | example RBAC and Deployment |
+| `charts/` | Helm chart (published to ghcr.io on release) |
+| `hack/` | chart rendering tests and the RBAC least-privilege check |
+| `deploy/` | plain-manifest alternative to the chart |
 | `examples/` | sample HTTPRoute / VirtualService |
 
 ## Pull requests

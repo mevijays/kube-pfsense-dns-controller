@@ -1,0 +1,133 @@
+{{- $url := required "pfsense.url is required (e.g. https://pfsense.example.lan)" .Values.pfsense.url }}
+{{- $domains := required "config.domains is required (e.g. [example.lan])" (include "kpdc.domains" . | trim) }}
+{{- if and (not .Values.pfsense.existingSecret) (not .Values.pfsense.apiKey) }}
+{{- fail "set pfsense.existingSecret (recommended) or pfsense.apiKey" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "kpdc.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kpdc.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "kpdc.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if and (not .Values.pfsense.existingSecret) .Values.pfsense.apiKey }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "kpdc.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "kpdc.serviceAccountName" . }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --zap-log-level={{ .Values.config.logLevel }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          env:
+            - name: PFSENSE_URL
+              value: {{ $url | quote }}
+            - name: PFSENSE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "kpdc.secretName" . }}
+                  key: {{ include "kpdc.secretKey" . }}
+            - name: PFSENSE_INSECURE_SKIP_VERIFY
+              value: {{ .Values.pfsense.insecureSkipVerify | quote }}
+            {{- if .Values.pfsense.caSecret }}
+            - name: PFSENSE_CA_FILE
+              value: /etc/pfsense-ca/{{ .Values.pfsense.caSecretKey }}
+            {{- end }}
+            - name: DNS_DOMAINS
+              value: {{ $domains | quote }}
+            - name: OWNER_ID
+              value: {{ .Values.config.ownerId | quote }}
+            - name: PRUNE
+              value: {{ .Values.config.prune | quote }}
+            - name: ADOPT_EXISTING
+              value: {{ .Values.config.adoptExisting | quote }}
+            - name: DRY_RUN
+              value: {{ .Values.config.dryRun | quote }}
+            - name: ISTIO_GATEWAY_NAMESPACES
+              value: {{ join "," .Values.config.istioGatewayNamespaces | quote }}
+            - name: ENABLE_ISTIO
+              value: {{ .Values.config.enableIstio | quote }}
+            - name: ENABLE_GATEWAY_API
+              value: {{ .Values.config.enableGatewayAPI | quote }}
+            - name: RESYNC_PERIOD
+              value: {{ .Values.config.resyncPeriod | quote }}
+            - name: LEADER_ELECT
+              value: {{ .Values.leaderElection.enabled | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: probes
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probes
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probes
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- if .Values.pfsense.caSecret }}
+          volumeMounts:
+            - name: pfsense-ca
+              mountPath: /etc/pfsense-ca
+              readOnly: true
+          {{- end }}
+      {{- if .Values.pfsense.caSecret }}
+      volumes:
+        - name: pfsense-ca
+          secret:
+            secretName: {{ .Values.pfsense.caSecret }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

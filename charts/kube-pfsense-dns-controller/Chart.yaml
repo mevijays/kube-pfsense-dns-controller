@@ -1,0 +1,21 @@
+apiVersion: v2
+name: kube-pfsense-dns-controller
+description: Syncs Gateway API HTTPRoute and Istio VirtualService hostnames to pfSense DNS Resolver host overrides
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/mevijays/kube-pfsense-dns-controller
+sources:
+  - https://github.com/mevijays/kube-pfsense-dns-controller
+keywords:
+  - pfsense
+  - dns
+  - istio
+  - gateway-api
+  - controller
+maintainers:
+  - name: mevijays
+    url: https://github.com/mevijays
+annotations:
+  artifacthub.io/license: Apache-2.0

@@ -1,0 +1,106 @@
+# Default values for kube-pfsense-dns-controller.
+# Required: pfsense.url, an API key (pfsense.existingSecret or pfsense.apiKey) and config.domains.
+
+image:
+  repository: ghcr.io/mevijays/kube-pfsense-dns-controller
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# One replica is enough. With leaderElection enabled, 2 replicas give fast failover.
+replicaCount: 1
+
+pfsense:
+  # Base URL of pfSense, e.g. https://pfsense.example.lan   (REQUIRED)
+  url: ""
+  # Name of an existing Secret that holds the REST API key. Recommended.
+  #   kubectl -n <ns> create secret generic pfsense-api --from-literal=api-key='<bare key>'
+  existingSecret: ""
+  existingSecretKey: api-key
+  # Alternative for quick tests only: the chart creates a Secret from this value.
+  # The key is then stored in the Helm release; prefer existingSecret.
+  apiKey: ""
+  # Skip TLS verification of the pfSense certificate (lab use). Prefer caSecret.
+  insecureSkipVerify: false
+  # Name of a Secret holding the CA certificate (PEM) that signed pfSense's certificate.
+  caSecret: ""
+  caSecretKey: ca.crt
+
+config:
+  # DNS domains to manage, e.g. [example.lan]. Hostnames outside them are ignored. (REQUIRED)
+  domains: []
+  # Ownership tag written into each override's description. Only tagged entries are ever
+  # changed or deleted. Use a different value per cluster that shares one pfSense.
+  ownerId: k8s-dns-sync
+  # Delete managed overrides whose route/VirtualService no longer exists.
+  prune: true
+  # Take over unmanaged overrides whose name matches a route (tags them, fixes their IP).
+  adoptExisting: false
+  # Log what would change without writing to pfSense.
+  dryRun: false
+  # Namespaces holding the Istio ingress gateway pods and Services. A Role is created in each.
+  istioGatewayNamespaces:
+    - istio-system
+  enableIstio: true
+  enableGatewayAPI: true
+  resyncPeriod: 2m
+  # debug | info | error  (or a number for verbosity levels)
+  logLevel: info
+
+leaderElection:
+  enabled: true
+
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# Extra environment variables / container arguments.
+extraEnv: []
+extraArgs: []
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 25m
+    memory: 48Mi
+  limits:
+    memory: 192Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+metrics:
+  # Create a Service for the Prometheus metrics endpoint (port 8080).
+  service:
+    enabled: false
+  # Create a ServiceMonitor (needs the Prometheus Operator CRDs and metrics.service.enabled).
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}

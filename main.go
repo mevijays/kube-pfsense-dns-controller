@@ -36,6 +36,7 @@ func main() {
 		domains     = flag.String("domains", env("DNS_DOMAINS", ""), "comma-separated domains to manage, e.g. mylab.lan (env DNS_DOMAINS, required)")
 		owner       = flag.String("owner-id", env("OWNER_ID", "k8s-dns-sync"), "ownership tag written to the override description; only tagged entries are changed or deleted")
 		prune       = flag.Bool("prune", envBool("PRUNE", true), "delete managed overrides that no longer have a VirtualService/HTTPRoute")
+		adopt       = flag.Bool("adopt-existing", envBool("ADOPT_EXISTING", false), "take over unmanaged host overrides whose name matches a route (tags them and fixes their IP) instead of skipping them (env ADOPT_EXISTING)")
 		dryRun      = flag.Bool("dry-run", envBool("DRY_RUN", false), "log changes instead of writing to pfSense; with no --pfsense-url pfSense is treated as empty")
 		istioNS     = flag.String("istio-gateway-namespaces", env("ISTIO_GATEWAY_NAMESPACES", "istio-system"), "namespaces holding Istio ingress gateway pods/Services")
 		enableIstio = flag.Bool("enable-istio", envBool("ENABLE_ISTIO", true), "watch Istio VirtualServices")
@@ -112,11 +113,12 @@ func main() {
 		Backend: backend,
 		Owner:   *owner,
 		Prune:   *prune,
+		Adopt:   *adopt,
 		Log:     ctrl.Log.WithName("sync"),
 	}
 	must(log, r.Setup(mgr, *resync))
 
-	log.Info("starting", "domains", doms, "owner", *owner, "prune", *prune, "istio", *enableIstio, "gatewayAPI", *enableGWAPI)
+	log.Info("starting", "domains", doms, "owner", *owner, "prune", *prune, "adopt", *adopt, "istio", *enableIstio, "gatewayAPI", *enableGWAPI)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		fatal(log, "manager exited: "+err.Error())
 	}

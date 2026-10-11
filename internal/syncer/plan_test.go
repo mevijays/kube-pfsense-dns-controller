@@ -28,7 +28,7 @@ func managed(id int, host, ip string) pfsense.HostOverride {
 }
 
 func TestCreateWhenMissing(t *testing.T) {
-	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.61"}), nil, owner, true)
+	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.61"}), nil, Options{Owner: owner, Prune: true})
 	if len(p.Create) != 1 || p.Create[0].FQDN() != "jenkins.mylab.lan" || p.Create[0].IP[0] != "172.16.1.61" {
 		t.Fatalf("plan = %+v", p)
 	}
@@ -38,14 +38,14 @@ func TestCreateWhenMissing(t *testing.T) {
 }
 
 func TestNoChangeWhenInSync(t *testing.T) {
-	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.61"}), []pfsense.HostOverride{managed(0, "jenkins", "172.16.1.61")}, owner, true)
+	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.61"}), []pfsense.HostOverride{managed(0, "jenkins", "172.16.1.61")}, Options{Owner: owner, Prune: true})
 	if !p.Empty() {
 		t.Fatalf("expected empty plan, got %+v", p)
 	}
 }
 
 func TestUpdateWhenIPChanges(t *testing.T) {
-	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.63"}), []pfsense.HostOverride{managed(4, "jenkins", "172.16.1.61")}, owner, true)
+	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.63"}), []pfsense.HostOverride{managed(4, "jenkins", "172.16.1.61")}, Options{Owner: owner, Prune: true})
 	if len(p.Update) != 1 || p.Update[0].ID != 4 || !reflect.DeepEqual(p.Update[0].IP, []string{"172.16.1.63"}) {
 		t.Fatalf("plan = %+v", p)
 	}
@@ -54,12 +54,12 @@ func TestUpdateWhenIPChanges(t *testing.T) {
 func TestNeverTouchesUnmanagedEntries(t *testing.T) {
 	manual := pfsense.HostOverride{ID: 1, Host: "jenkins", Domain: "mylab.lan", IP: []string{"10.9.9.9"}, Descr: "made by hand"}
 	other := pfsense.HostOverride{ID: 2, Host: "nas", Domain: "mylab.lan", IP: []string{"10.0.0.5"}, Descr: "my nas"}
-	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.61"}), []pfsense.HostOverride{manual, other}, owner, true)
+	p := BuildPlan(desired([3]string{"jenkins", "mylab.lan", "172.16.1.61"}), []pfsense.HostOverride{manual, other}, Options{Owner: owner, Prune: true})
 	if !p.Empty() {
 		t.Fatalf("manual entries must not be changed or deleted: %+v", p)
 	}
-	if !reflect.DeepEqual(p.Conflicts, []string{"jenkins.mylab.lan"}) {
-		t.Fatalf("conflicts = %v", p.Conflicts)
+	if len(p.Conflicts) != 1 || p.Conflicts[0].Name != "jenkins.mylab.lan" || p.Conflicts[0].Same() {
+		t.Fatalf("conflicts = %+v", p.Conflicts)
 	}
 }
 
@@ -68,11 +68,11 @@ func TestPrune(t *testing.T) {
 		{ID: 2, Host: "nas", Domain: "mylab.lan", IP: []string{"10.0.0.5"}, Descr: "my nas"}}
 	want := desired([3]string{"keep", "mylab.lan", "172.16.1.61"})
 
-	p := BuildPlan(want, cur, owner, true)
+	p := BuildPlan(want, cur, Options{Owner: owner, Prune: true})
 	if len(p.Delete) != 1 || p.Delete[0].Host != "gone" {
 		t.Fatalf("prune plan = %+v", p)
 	}
-	p = BuildPlan(want, cur, owner, false)
+	p = BuildPlan(want, cur, Options{Owner: owner, Prune: false})
 	if len(p.Delete) != 0 {
 		t.Fatalf("prune disabled but deletes planned: %+v", p)
 	}
@@ -81,12 +81,12 @@ func TestPrune(t *testing.T) {
 func TestSkipsRecordsWithoutIP(t *testing.T) {
 	s := records.Set{}
 	s.Add("pending", "mylab.lan", "", "HTTPRoute/default/x") // gateway has no address yet
-	p := BuildPlan(s, nil, owner, true)
+	p := BuildPlan(s, nil, Options{Owner: owner, Prune: true})
 	if !p.Empty() {
 		t.Fatalf("plan = %+v", p)
 	}
 	// ...and an existing managed entry for it is pruned, not kept.
-	p = BuildPlan(s, []pfsense.HostOverride{managed(0, "pending", "1.1.1.1")}, owner, true)
+	p = BuildPlan(s, []pfsense.HostOverride{managed(0, "pending", "1.1.1.1")}, Options{Owner: owner, Prune: true})
 	if len(p.Delete) != 1 {
 		t.Fatalf("plan = %+v", p)
 	}

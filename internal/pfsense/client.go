@@ -65,6 +65,7 @@ type Options struct {
 
 // New builds a Client. baseURL is e.g. https://pfsense.mylab.lan.
 func New(baseURL, apiKey string, opts Options) (*Client, error) {
+	apiKey = strings.TrimSpace(apiKey) // a trailing newline from a secret file is a common mistake
 	if baseURL == "" {
 		return nil, fmt.Errorf("pfsense url is empty")
 	}
@@ -111,7 +112,11 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	return fmt.Sprintf("pfsense %s %s: HTTP %d: %s (%s)", e.Method, e.Path, e.HTTPStatus, e.Message, e.ResponseID)
+	msg := fmt.Sprintf("pfsense %s %s: HTTP %d: %s (%s)", e.Method, e.Path, e.HTTPStatus, e.Message, e.ResponseID)
+	if e.HTTPStatus == http.StatusUnauthorized || e.HTTPStatus == http.StatusForbidden {
+		msg += " - check PFSENSE_API_KEY (it must be the bare key, and its user needs DNS Resolver privileges)"
+	}
+	return msg
 }
 
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any, out any) error {

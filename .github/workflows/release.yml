@@ -1,18 +1,49 @@
-name: Release image
+name: Release
 
-# Publishes a multi-arch image to GitHub Container Registry when a version tag is pushed:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Publishes the container image and the Helm chart when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0        (v0.1.0-rc.1 style tags are published as pre-releases)
+#
+#   image: ghcr.io/<owner>/kube-pfsense-dns-controller:<version>        (linux/amd64, linux/arm64)
+#   chart: oci://ghcr.io/<owner>/charts/kube-pfsense-dns-controller --version <version>
+#          and the packaged .tgz is attached to the GitHub Release.
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: read
-  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  CHART_REGISTRY: ghcr.io/${{ github.repository_owner }}/charts
 
 jobs:
-  image:
+  verify:
+    name: Verify
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test -race ./...
+      - name: Chart tests
+        run: |
+          pip install --quiet pyyaml
+          helm lint charts/kube-pfsense-dns-controller --strict \
+            --set pfsense.url=https://pfsense.example.lan --set pfsense.existingSecret=x --set 'config.domains={example.lan}'
+          ./hack/chart-test.sh
+
+  image:
+    name: Publish image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3
@@ -25,7 +56,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -34,5 +65,36 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: true
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  chart:
+    name: Publish chart
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the GitHub Release
+      packages: write   # push the chart to ghcr.io
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Package
+        id: pkg
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          helm package charts/kube-pfsense-dns-controller --version "$version" --app-version "$version" --destination dist
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "file=dist/kube-pfsense-dns-controller-$version.tgz" >> "$GITHUB_OUTPUT"
+      - name: Push chart to ghcr.io (OCI)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+          helm push "${{ steps.pkg.outputs.file }}" "oci://${CHART_REGISTRY}"
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          flags=(--generate-notes)
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" "${{ steps.pkg.outputs.file }}" --title "$GITHUB_REF_NAME" "${flags[@]}"

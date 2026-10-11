@@ -1,0 +1,14 @@
+kube-pfsense-dns-controller {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+It publishes hostnames of HTTPRoutes{{ if .Values.config.enableIstio }} and Istio VirtualServices{{ end }} under
+  {{ include "kpdc.domains" . }}
+as DNS Resolver host overrides on {{ .Values.pfsense.url }}.
+{{- if .Values.config.dryRun }}
+
+DRY RUN is ON: changes are only logged. Set config.dryRun=false to write to pfSense.
+{{- end }}
+
+Watch what it does:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "kpdc.fullname" . }} -f
+
+Only overrides whose description starts with "managed-by={{ .Values.config.ownerId }}" are ever changed or deleted.

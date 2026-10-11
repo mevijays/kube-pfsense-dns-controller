@@ -21,6 +21,7 @@ import (
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"github.com/mevijays/kube-pfsense-dns-controller/internal/discover"
+	"github.com/mevijays/kube-pfsense-dns-controller/internal/metrics"
 	"github.com/mevijays/kube-pfsense-dns-controller/internal/pfsense"
 	"github.com/mevijays/kube-pfsense-dns-controller/internal/syncer"
 )
@@ -36,6 +37,7 @@ type Reconciler struct {
 	Backend    pfsense.Backend
 	Owner      string
 	Prune      bool
+	Adopt      bool
 	Log        logr.Logger
 
 	mu sync.Mutex // serialises the periodic loop and event-driven reconciles
@@ -47,21 +49,37 @@ func (r *Reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 }
 
 // Sync performs one full cycle.
-func (r *Reconciler) Sync(ctx context.Context) error {
+func (r *Reconciler) Sync(ctx context.Context) (err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer func() {
+		if err != nil {
+			metrics.Syncs.WithLabelValues("error").Inc()
+			return
+		}
+		metrics.Syncs.WithLabelValues("success").Inc()
+		metrics.LastSuccess.SetToCurrentTime()
+	}()
 
 	desired, derr := r.Discoverer.Discover(ctx)
 	if derr != nil {
 		r.Log.Error(derr, "discovery incomplete; pruning disabled for this cycle")
 	}
-	current, err := r.Backend.ListHostOverrides(ctx)
-	if err != nil {
-		return errors.Join(derr, err)
+	metrics.DesiredRecords.Set(float64(len(desired)))
+	current, lerr := r.Backend.ListHostOverrides(ctx)
+	if lerr != nil {
+		return errors.Join(derr, lerr)
 	}
-	plan := syncer.BuildPlan(desired, current, r.Owner, r.Prune && derr == nil)
-	for _, name := range plan.Conflicts {
-		r.Log.Info("skipping: an unmanaged host override with this name already exists", "fqdn", name)
+	plan := syncer.BuildPlan(desired, current, syncer.Options{Owner: r.Owner, Prune: r.Prune && derr == nil, Adopt: r.Adopt})
+	metrics.Conflicts.Set(float64(len(plan.Conflicts)))
+	for _, c := range plan.Conflicts {
+		if c.Same() {
+			r.Log.Info("unmanaged host override already resolves to the desired IP; leaving it alone (use --adopt-existing to manage it)",
+				"fqdn", c.Name, "ip", c.Desired)
+			continue
+		}
+		r.Log.Info("CONFLICT: an unmanaged host override has a different IP; skipping (use --adopt-existing to take it over)",
+			"fqdn", c.Name, "pfsenseIP", c.Existing, "clusterIP", c.Desired)
 	}
 	if plan.Empty() {
 		r.Log.V(1).Info("in sync", "records", len(desired))

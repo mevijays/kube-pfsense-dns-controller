@@ -1,0 +1,100 @@
+{{- if .Values.rbac.create }}
+# Read-only access to the objects that carry hostnames and gateway addresses.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "kpdc.fullname" . }}
+  labels:
+    {{- include "kpdc.labels" . | nindent 4 }}
+rules:
+  {{- if .Values.config.enableGatewayAPI }}
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "gateways"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if .Values.config.enableIstio }}
+  - apiGroups: ["networking.istio.io"]
+    resources: ["virtualservices", "gateways"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "kpdc.fullname" . }}
+  labels:
+    {{- include "kpdc.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "kpdc.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kpdc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.config.enableIstio }}
+{{- $root := . }}
+{{- range .Values.config.istioGatewayNamespaces }}
+---
+# Pods and Services are read only in the namespace of the Istio ingress gateway, to find
+# the LoadBalancer IP in front of it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kpdc.fullname" $root }}
+  namespace: {{ . }}
+  labels:
+    {{- include "kpdc.labels" $root | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kpdc.fullname" $root }}
+  namespace: {{ . }}
+  labels:
+    {{- include "kpdc.labels" $root | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kpdc.fullname" $root }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kpdc.serviceAccountName" $root }}
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}
+{{- end }}
+{{- if .Values.leaderElection.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "kpdc.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kpdc.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "kpdc.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kpdc.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "kpdc.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "kpdc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

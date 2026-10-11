@@ -22,8 +22,24 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      - name: Static analysis
+        run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       - name: Build
         run: CGO_ENABLED=0 go build -trimpath -o /dev/null .
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Lint and test the chart
+        run: |
+          pip install --quiet pyyaml
+          helm lint charts/kube-pfsense-dns-controller --strict \
+            --set pfsense.url=https://pfsense.example.lan --set pfsense.existingSecret=x --set 'config.domains={example.lan}'
+          ./hack/chart-test.sh
 
   image:
     runs-on: ubuntu-latest

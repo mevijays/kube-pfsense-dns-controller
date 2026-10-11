@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "pfsense": {
+      "type": "object",
+      "properties": {
+        "url": { "type": "string", "pattern": "^(https?://.+)?$" },
+        "existingSecret": { "type": "string" },
+        "apiKey": { "type": "string" },
+        "insecureSkipVerify": { "type": "boolean" }
+      }
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "domains": { "oneOf": [ { "type": "string" }, { "type": "array", "items": { "type": "string" } } ] },
+        "prune": { "type": "boolean" },
+        "adoptExisting": { "type": "boolean" },
+        "dryRun": { "type": "boolean" },
+        "istioGatewayNamespaces": { "type": "array", "items": { "type": "string" } },
+        "enableIstio": { "type": "boolean" },
+        "enableGatewayAPI": { "type": "boolean" }
+      }
+    }
+  }
+}
