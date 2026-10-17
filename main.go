@@ -95,6 +95,10 @@ func main() {
 		HealthProbeBindAddress: *probeAddr,
 		LeaderElection:         *leaderElect,
 		LeaderElectionID:       leaseID(*leaseName, *owner),
+		// Hand the lease over immediately on shutdown (rollouts, restarts) instead
+		// of making the next replica wait for it to expire. Safe: the process exits
+		// right after the manager stops.
+		LeaderElectionReleaseOnCancel: true,
 		// Serve Istio (unstructured) reads from the informer cache too.
 		Client: client.Options{Cache: &client.CacheOptions{Unstructured: true}},
 	})

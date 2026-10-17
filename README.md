@@ -126,7 +126,7 @@ Flags, with environment variables as defaults. Boolean and duration variables ar
 | Env | Flag | Default | Description |
 |---|---|---|---|
 | `PFSENSE_URL` | `--pfsense-url` | | pfSense base URL, e.g. `https://pfsense.mylab.lan` |
-| `PFSENSE_API_KEY_FILE` | `--pfsense-api-key-file` | | File holding the API key, re-read on every request (the chart mounts the Secret here, so rotating it needs no restart) |
+| `PFSENSE_API_KEY_FILE` | `--pfsense-api-key-file` | | File holding the API key, re-read on every request (the chart mounts the Secret here, so rotating it needs no restart; the kubelet refreshes the file within about 1-2 minutes) |
 | `PFSENSE_API_KEY` | | | API key as an environment variable (used when no key file is set; never a flag) |
 | `PFSENSE_CA_FILE` | `--pfsense-ca-file` | | CA bundle to trust for pfSense's certificate |
 | `PFSENSE_INSECURE_SKIP_VERIFY` | `--pfsense-insecure-skip-verify` | `false` | Skip TLS verification (lab use) |

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -184,5 +185,43 @@ func TestApplyRunsEvenIfContextIsCancelled(t *testing.T) {
 	b := &ctxCheckingBackend{}
 	if err := Apply(ctx, b); err != nil || b.applied != 1 {
 		t.Fatalf("apply did not run on a cancelled context: err=%v applied=%d", err, b.applied)
+	}
+}
+
+// sortedMem behaves like a real pfSense: creates are inserted in name order,
+// so they shift the IDs of every entry that sorts after them.
+type sortedMem struct{ mem }
+
+func (s *sortedMem) CreateHostOverride(_ context.Context, h pfsense.HostOverride) error {
+	i := sort.Search(len(s.items), func(i int) bool { return s.items[i].FQDN() >= h.FQDN() })
+	s.items = append(s.items, pfsense.HostOverride{})
+	copy(s.items[i+1:], s.items[i:])
+	s.items[i] = h
+	return nil
+}
+
+// Seen live: deleting "zz" and creating "aa" in one sync. With creates before
+// deletes, the create shifted zz's ID and the delete was (safely) refused, costing
+// a failed cycle. Creates now run last, so one cycle converges without errors.
+func TestCreateAndDeleteInOneCycleOnSortedPfSense(t *testing.T) {
+	s := &sortedMem{mem: mem{items: []pfsense.HostOverride{
+		{Host: "jenkins", Domain: "mylab.lan", IP: []string{"10.0.0.1"}, Descr: "hand made"},
+		{Host: "vault", Domain: "mylab.lan", IP: []string{"10.0.0.2"}, Descr: "hand made"},
+		{Host: "zz-e2e", Domain: "mylab.lan", IP: []string{"10.0.0.3"}, Descr: Marker(owner) + " src=x"},
+	}}}
+	cur, _ := s.ListHostOverrides(context.Background())
+	plan := BuildPlan(desired([3]string{"aa-e2e", "mylab.lan", "10.0.0.9"}), cur, Options{Owner: owner, Prune: true})
+	if len(plan.Create) != 1 || len(plan.Delete) != 1 {
+		t.Fatalf("setup: %+v", plan)
+	}
+	if _, err := Execute(context.Background(), s, plan, logr.Discard()); err != nil {
+		t.Fatalf("one cycle must succeed, got %v", err)
+	}
+	got := []string{}
+	for _, h := range s.items {
+		got = append(got, h.FQDN())
+	}
+	if !reflect.DeepEqual(got, []string{"aa-e2e.mylab.lan", "jenkins.mylab.lan", "vault.mylab.lan"}) {
+		t.Fatalf("state = %v", got)
 	}
 }

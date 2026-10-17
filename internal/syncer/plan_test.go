@@ -150,9 +150,9 @@ func TestExecuteOrderAndSingleApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"update upd.mylab.lan", "create new.mylab.lan", "delete 5", "delete 3", "delete 2"}
+	want := []string{"update upd.mylab.lan", "delete 5", "delete 3", "delete 2", "create new.mylab.lan"}
 	if !reflect.DeepEqual(f.ops, want) {
-		t.Errorf("ops = %v, want %v (deletes must run highest ID first)", f.ops, want)
+		t.Errorf("ops = %v, want %v (updates, then deletes highest ID first, then creates)", f.ops, want)
 	}
 	if f.applied != 1 || !res.Changed || !res.Applied {
 		t.Errorf("apply called %d times, result %+v", f.applied, res)

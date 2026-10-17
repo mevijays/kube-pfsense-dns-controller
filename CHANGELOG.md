@@ -6,6 +6,12 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed (found in live testing against a real pfSense)
+- pfSense keeps host overrides sorted by name, so a create is inserted mid-list and shifts IDs. Creates now run after
+  updates and deletes, so a create and a delete in the same sync no longer cost a refused write and an extra cycle.
+- Leader election could not record its Event (`events is forbidden`); the Role now allows creating Events in its namespace.
+- The leader lease is released on shutdown, so a restart or rollout hands over immediately instead of after ~15s.
+
 ### Fixed (in-depth review)
 - Updates and deletes re-read each entry by ID and only write if it is unchanged, so a concurrent edit in the pfSense UI
   or by another controller can no longer make the controller modify or delete the wrong (possibly hand-made) record.

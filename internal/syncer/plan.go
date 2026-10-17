@@ -238,9 +238,12 @@ type Result struct {
 
 // Execute applies the plan.
 //
-// pfSense IDs are list positions that shift when an entry is removed, so:
-// updates run first, creates next (they append), and deletes last from the
-// highest ID down. Before every update or delete the entry is re-read by ID and
+// pfSense IDs are list positions, and pfSense keeps host overrides sorted by
+// name: a delete shifts every later entry down, and a create is inserted at its
+// sorted position, shifting every later entry up. So the order is: updates
+// (no shifts), then deletes from the highest ID down (each delete only shifts
+// entries above it, which were already handled), then creates (nothing after
+// them uses an ID). Before every update or delete the entry is re-read by ID and
 // must still be exactly the one that was planned against; on any mismatch (a
 // change made in the UI or by another controller) the remaining ID-based writes
 // are skipped and ErrConcurrentChange is returned.
@@ -269,15 +272,6 @@ func Execute(ctx context.Context, b pfsense.Backend, p Plan, log logr.Logger) (R
 		res.Changed = true
 		metrics.Changes.WithLabelValues("update").Inc()
 	}
-	for _, h := range p.Create {
-		log.Info("creating host override", "fqdn", h.FQDN(), "ip", h.IP)
-		if err := b.CreateHostOverride(ctx, h); err != nil {
-			errs = append(errs, fmt.Errorf("create %s: %w", h.FQDN(), err))
-			continue
-		}
-		res.Changed = true
-		metrics.Changes.WithLabelValues("create").Inc()
-	}
 	if !stale {
 		del := append([]pfsense.HostOverride(nil), p.Delete...)
 		sort.Slice(del, func(i, j int) bool { return del[i].ID > del[j].ID })
@@ -297,6 +291,17 @@ func Execute(ctx context.Context, b pfsense.Backend, p Plan, log logr.Logger) (R
 			res.Changed = true
 			metrics.Changes.WithLabelValues("delete").Inc()
 		}
+	}
+
+	// Creates last: pfSense inserts them in sorted position, shifting IDs.
+	for _, h := range p.Create {
+		log.Info("creating host override", "fqdn", h.FQDN(), "ip", h.IP)
+		if err := b.CreateHostOverride(ctx, h); err != nil {
+			errs = append(errs, fmt.Errorf("create %s: %w", h.FQDN(), err))
+			continue
+		}
+		res.Changed = true
+		metrics.Changes.WithLabelValues("create").Inc()
 	}
 
 	if res.Changed {

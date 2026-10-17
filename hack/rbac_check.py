@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Reads rendered manifests on stdin and fails if the controller's RBAC is broader than intended.
 
-Allowed: read verbs (get/list/watch) on the listed resources, and write verbs ONLY on leases.
+Allowed: read verbs (get/list/watch) on the listed resources; write verbs ONLY on its own
+leases, and create/patch on events (recorded by leader election), both in its own namespace.
 """
 import sys
 import yaml
@@ -16,8 +17,11 @@ for doc in yaml.safe_load_all(sys.stdin):
         verbs, res = set(rule.get("verbs", [])), set(rule.get("resources", []))
         if "*" in verbs or "*" in res or "*" in rule.get("apiGroups", []):
             errors.append(f"{name}: wildcard in {rule}")
-        if verbs - READ and res != {"leases"}:
-            errors.append(f"{name}: write verbs {sorted(verbs - READ)} on {sorted(res)}")
+        writes = verbs - READ
+        if writes and res != {"leases"} and not (res == {"events"} and writes <= {"create", "patch"}):
+            errors.append(f"{name}: write verbs {sorted(writes)} on {sorted(res)}")
+        if writes and doc["kind"] == "ClusterRole":
+            errors.append(f"{name}: write verbs must never be cluster-wide")
         if "secrets" in res:
             errors.append(f"{name}: must not read secrets")
         if doc["kind"] == "ClusterRole" and ("pods" in res or "services" in res):
