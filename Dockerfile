@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build stage: static binary, cross-compiled natively (no emulation) ----
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS builder
 # go.mod pins a patched Go release; fetch it if the base image is older.
 ENV GOTOOLCHAIN=auto
 RUN apk add --no-cache ca-certificates
